@@ -11,8 +11,18 @@ import 'gemma_service.dart';
 class DocumentService {
   final StorageService _storage;
   final GemmaService _gemma;
-  static const int _chunkSize = 500;
-  static const int _chunkOverlap = 100;
+
+  // The embedder (MiniLM-L12-v2) truncates input at ~256 wordpiece tokens
+  // (~180 plain words). Chunks must stay well under that or their middle gets
+  // silently cut off before embedding, which is what made retrieval miss
+  // whole sections (e.g. the skills list on a resume).
+  static const int _chunkSizeWords = 140;
+  static const int _chunkOverlapWords = 30;
+
+  /// Bump whenever chunking/indexing logic changes in a way that requires
+  /// re-indexing existing documents. In [indexDocument] we persist this
+  /// version, and the provider re-indexes everything below it on startup.
+  static const int chunkerVersion = 2;
 
   DocumentService(this._storage, this._gemma);
 
@@ -51,33 +61,47 @@ class DocumentService {
         return;
       }
 
+      // Any chunks from a previous (failed/partial) indexing attempt must go
+      // first, otherwise retried docs keep surfacing stale duplicates.
+      await _gemma.deleteDocumentChunks(docId, chunkCount: doc.chunkCount);
+
       final pages = await _extractTextByPage(file);
-      if (pages.isEmpty) {
+      if (pages.every((pageText) => pageText.trim().isEmpty)) {
         await _storage.saveDocument(doc.copyWith(status: DocumentStatus.failed));
         return;
       }
 
+      final safeName = doc.name.replaceAll('"', "'");
       int indexedCount = 0;
 
       for (int pageIndex = 0; pageIndex < pages.length; pageIndex++) {
-        final pageText = pages[pageIndex];
+        final pageText = pages[pageIndex].trim();
         if (pageText.isEmpty) continue;
 
         final chunks = _chunkText(pageText);
         for (int chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
-          final chunkId = '${docId}_chunk_$indexedCount';
-          final embedding = await _gemma.embedText(chunks[chunkIdx]);
+          final embedding =
+              await _gemma.embedText(chunks[chunkIdx], taskType: EmbeddingTaskType.document);
 
           if (embedding.isNotEmpty) {
             await _gemma.addDocumentToVectorStore(
-              id: chunkId,
+              id: '${docId}_chunk_$indexedCount',
               content: chunks[chunkIdx],
               embedding: embedding,
-              metadata: '{"documentId":"$docId","page":$pageIndex}',
+              metadata:
+                  '{"documentId":"$docId","page":$pageIndex,"docName":"$safeName"}',
             );
             indexedCount++;
           }
         }
+      }
+
+      if (indexedCount == 0) {
+        // Nothing got embedded — most commonly the embedder isn't ready.
+        // Reporting success here would leave a doc that silently answers
+        // "no context" forever, so fail visibly instead.
+        await _storage.saveDocument(doc.copyWith(status: DocumentStatus.failed));
+        return;
       }
 
       await _storage.saveDocument(doc.copyWith(
@@ -119,16 +143,25 @@ class DocumentService {
     }
   }
 
+  /// Splits [text] into overlapping chunks of [_chunkSizeWords] words.
+  ///
+  /// Words are used (not characters) as a conservative proxy for tokens:
+  /// 140 words is ~190 wordpiece tokens, safely under the embedder's ~256
+  /// token truncation limit for prose. The overlap keeps sentences that
+  /// straddle a boundary findable from both sides.
   List<String> _chunkText(String text) {
     final words = text.split(RegExp(r'\s+'));
     final chunks = <String>[];
 
-    for (int i = 0; i < words.length; i += _chunkSize - _chunkOverlap) {
-      final end = min(i + _chunkSize, words.length);
+    int i = 0;
+    while (i < words.length) {
+      final end = min(i + _chunkSizeWords, words.length);
       final chunk = words.sublist(i, end).join(' ').trim();
       if (chunk.isNotEmpty) {
         chunks.add(chunk);
       }
+      if (end >= words.length) break;
+      i += _chunkSizeWords - _chunkOverlapWords;
     }
 
     return chunks;
@@ -152,10 +185,31 @@ class DocumentService {
   Future<void> retryIndexing(String docId) async {
     final doc = _storage.getDocument(docId);
     if (doc == null) return;
-    await _storage.saveDocument(doc.copyWith(
-      status: DocumentStatus.indexing,
-      chunkCount: 0,
-    ));
+    // Keep the stored chunkCount so indexDocument can delete the old chunks
+    // before writing new ones (prevents stale leftovers from a previous run).
+    await _storage.saveDocument(doc.copyWith(status: DocumentStatus.indexing));
     await indexDocument(docId);
+  }
+
+  /// Re-indexes indexed documents when the chunking logic changed since the
+  /// last run. Docs indexed before the current [chunkerVersion] were built
+  /// with oversized chunks that broke retrieval, so they must be rebuilt.
+  /// Skipped when models aren't ready yet — retried on next launch.
+  Future<void> reindexAllIfStale() async {
+    if (_storage.chunkerVersion >= chunkerVersion) return;
+    if (!_gemma.isInitialized || !_gemma.isEmbedderInstalled) return;
+
+    var reindexed = 0;
+    for (final doc in documents) {
+      if (doc.status == DocumentStatus.indexed) {
+        await retryIndexing(doc.id);
+        reindexed++;
+      }
+    }
+    // Persist only after a fully successful pass, so a crash mid-way retries
+    // everything next launch instead of leaving half the library stale.
+    if (reindexed > 0) {
+      await _storage.setChunkerVersion(chunkerVersion);
+    }
   }
 }

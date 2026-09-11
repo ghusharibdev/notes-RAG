@@ -71,8 +71,9 @@ class InitState {
 class InitNotifier extends StateNotifier<InitState> {
   final GemmaService _gemma;
   final StorageService _storage;
+  final DocumentService _docService;
 
-  InitNotifier(this._gemma, this._storage) : super(const InitState()) {
+  InitNotifier(this._gemma, this._storage, this._docService) : super(const InitState()) {
     _init();
   }
 
@@ -95,6 +96,13 @@ class InitNotifier extends StateNotifier<InitState> {
       // If models are ready but onboarding hasn't been completed, mark it
       if (modelsReady && !_storage.isOnboardingComplete) {
         await _storage.setOnboardingComplete();
+      }
+
+      // Re-index documents whose chunks were built by an older (broken)
+      // chunker — otherwise previously uploaded docs keep answering poorly.
+      // Only safe here: initialization is guaranteed complete.
+      if (modelsReady) {
+        _docService.reindexAllIfStale().catchError((_) {});
       }
     } catch (e) {
       state = state.copyWith(
@@ -150,7 +158,8 @@ class InitNotifier extends StateNotifier<InitState> {
 final initProvider = StateNotifierProvider<InitNotifier, InitState>((ref) {
   final gemma = ref.watch(gemmaServiceProvider);
   final storage = ref.watch(storageServiceProvider);
-  return InitNotifier(gemma, storage);
+  final docService = ref.watch(documentServiceProvider);
+  return InitNotifier(gemma, storage, docService);
 });
 
 // ─── Documents ───
@@ -237,6 +246,10 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
     if (_isProcessing) return;
     _isProcessing = true;
 
+    // Capture history *before* adding this question, so follow-ups like
+    // "what about X?" get context from the earlier turns.
+    final history = List<ChatMessage>.from(state);
+
     addUserMessage(question);
 
     // Show retrieval trace animation
@@ -247,7 +260,7 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
     ]);
 
     try {
-      final result = await _rag.query(question);
+      final result = await _rag.query(question, history: history);
 
       // Remove streaming indicator, add real answer
       state = [

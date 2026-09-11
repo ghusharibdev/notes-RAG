@@ -5,6 +5,7 @@ class StorageService {
   static const String _documentsBox = 'documents';
   static const String _settingsBox = 'settings';
   static const String _onboardingKey = 'onboarding_complete';
+  static const String _chunkerVersionKey = 'chunker_version';
 
   late Box<DocumentModel> _documents;
   late Box _settings;
@@ -40,6 +41,12 @@ class StorageService {
   bool get isOnboardingComplete {
     return _settings.get(_onboardingKey, defaultValue: false) as bool;
   }
+
+  int get chunkerVersion =>
+      _settings.get(_chunkerVersionKey, defaultValue: 0) as int;
+
+  Future<void> setChunkerVersion(int version) =>
+      _settings.put(_chunkerVersionKey, version);
 
   Future<void> setOnboardingComplete() async {
     await _settings.put(_onboardingKey, true);

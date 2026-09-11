@@ -3,9 +3,18 @@ import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
 import 'package:flutter_gemma_rag_sqlite/flutter_gemma_rag_sqlite.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
+import '../config/secrets.dart';
+
+/// Which prefix the embedder applies before vectorizing text.
+///
+/// Sentence-transformers models are trained with different prefixes for
+/// queries and documents — using the wrong one measurably degrades retrieval.
+enum EmbeddingTaskType { query, document }
 
 class GemmaService {
-  static const String _defaultAppToken = 'REDACTED_HF_TOKEN';
+  // Token resolution order: explicit setter > lib/config/secrets.dart (local,
+  // skip-worktree-protected) > --dart-define=HF_TOKEN. Never hardcode here.
+  static const String _hfTokenEnv = String.fromEnvironment('HF_TOKEN');
 
   bool _initialized = false;
   bool get isInitialized => _initialized;
@@ -22,9 +31,17 @@ class GemmaService {
   String? _initError;
   String? get initError => _initError;
 
-  String? _hfToken = _defaultAppToken;
+  String? _hfToken;
   set hfToken(String? token) {
-    _hfToken = (token != null && token.isNotEmpty) ? token : _defaultAppToken;
+    _hfToken = (token != null && token.isNotEmpty) ? token : null;
+  }
+
+  /// Token resolution order: explicit setter > secrets.dart > --dart-define.
+  String? get _effectiveHfToken {
+    if (_hfToken != null) return _hfToken;
+    if (localHfToken.isNotEmpty) return localHfToken;
+    if (_hfTokenEnv.isNotEmpty) return _hfTokenEnv;
+    return null;
   }
 
   String? _ragDbPath;
@@ -48,7 +65,7 @@ class GemmaService {
         inferenceEngines: kIsWeb ? const [] : const [LiteRtLmEngine()],
         embeddingBackends: kIsWeb ? const [] : const [LiteRtEmbeddingBackend()],
         vectorStore: kIsWeb ? WebSqliteVectorStore() : SqliteVectorStore(),
-        huggingFaceToken: _hfToken,
+        huggingFaceToken: _effectiveHfToken,
       );
 
       final modelActive = FlutterGemma.hasActiveModel();
@@ -94,7 +111,7 @@ class GemmaService {
         fileType: ModelFileType.litertlm,
       ).fromNetwork(
         'https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm',
-        token: _hfToken,
+        token: _effectiveHfToken,
       ).withProgress((p) {
         _downloadProgress = p / 100.0;
         onProgress?.call(_downloadProgress);
@@ -145,11 +162,19 @@ class GemmaService {
     }
   }
 
-  Future<List<double>> embedText(String text) async {
+  Future<List<double>> embedText(
+    String text, {
+    EmbeddingTaskType taskType = EmbeddingTaskType.query,
+  }) async {
     if (!_initialized || !_embedderInstalled) return [];
     try {
       final embedder = await FlutterGemma.getActiveEmbedder();
-      return await embedder.generateEmbedding(text);
+      return await embedder.generateEmbedding(
+        text,
+        taskType: taskType == EmbeddingTaskType.document
+            ? TaskType.retrievalDocument
+            : TaskType.retrievalQuery,
+      );
     } catch (_) {
       return [];
     }
@@ -172,9 +197,14 @@ class GemmaService {
   Future<List<RetrievalResult>> searchSimilar({
     required String query,
     int topK = 5,
+    double threshold = 0.0,
   }) async {
     try {
-      return await FlutterGemma.rag.searchSimilar(query: query, topK: topK);
+      return await FlutterGemma.rag.searchSimilar(
+        query: query,
+        topK: topK,
+        threshold: threshold,
+      );
     } catch (_) {
       return [];
     }
@@ -191,34 +221,86 @@ class GemmaService {
   Future<String> generateResponse({
     required String question,
     required List<String> contextChunks,
+    List<String> historyTurns = const [],
   }) async {
     if (!_initialized || !_modelInstalled) {
       return 'Model not ready. Please complete model download on startup.';
     }
 
+    if (contextChunks.isEmpty) {
+      return "I couldn't find anything related to that in this document. "
+          'Try rephrasing, or check that the document finished indexing in the Library.';
+    }
+
     try {
-      final model = await FlutterGemma.getActiveModel(maxTokens: 512);
-      final session = await model.createSession();
+      // maxTokens here is the TOTAL context window (prompt + answer), not the
+      // output length. 512 was too small: the RAG prompt alone (5 chunks +
+      // question) overflowed it, so the model never even saw the question —
+      // the cause of the "no context" answers. 2048 fits the context and
+      // leaves room for the answer; maxOutputTokens caps the reply itself.
+      final model = await FlutterGemma.getActiveModel(maxTokens: 2048);
+      final session = await model.createSession(
+        temperature: 0.15,
+        topK: 1,
+        maxOutputTokens: 320,
+        systemInstruction:
+            'You are a precise document Q&A assistant. Answer ONLY from the '
+            'provided context. If the context does not contain the answer, say '
+            "you could not find it in the document. Be concise and factual. "
+            'When you use information from a source, cite it like [Source 1].',
+      );
+
       final contextBlock = contextChunks.asMap().entries.map((e) {
         return '[Source ${e.key + 1}]: ${e.value}';
       }).join('\n\n');
 
-      final prompt = '''Answer based on the context. Cite with [Source N].
+      final historyBlock = historyTurns.isEmpty
+          ? ''
+          : 'Previous conversation:\n${historyTurns.join('\n')}\n\n';
 
-Context:
+      final prompt = '''${historyBlock}Context:
 $contextBlock
 
 Question: $question
 
-Answer:''';
+Answer the question using only the context above. Cite sources as [Source N].''';
 
       await session.addQueryChunk(Message.text(text: prompt, isUser: true));
-      final response = await session.getResponse();
+      final raw = await session.getResponse();
       await session.close();
-      return response;
+
+      return _cleanResponse(raw);
     } catch (e) {
       return 'Error generating response: $e';
     }
+  }
+
+  /// Strips reasoning-model artifacts from the raw completion.
+  ///
+  /// Qwen3 emits a `<think>...</think>` block before the answer. When
+  /// generation is cut off before the closing tag, the whole visible "answer"
+  /// would otherwise be reasoning trace with no content.
+  String _cleanResponse(String raw) {
+    var text = raw.trim();
+
+    final closedThink = RegExp(r'<think>.*?</think>', dotAll: true);
+    text = text.replaceAll(closedThink, '').trim();
+
+    // Unclosed <think> means the model spent the whole budget reasoning —
+    // drop the trace and surface whatever came after it, if anything.
+    final openIdx = text.indexOf('<think>');
+    if (openIdx != -1) {
+      final closeIdx = text.indexOf('</think>');
+      text = closeIdx == -1
+          ? text.substring(0, openIdx).trim()
+          : text.replaceAll('<think>', '').replaceAll('</think>', '').trim();
+    }
+
+    if (text.isEmpty) {
+      return "I thought about this but couldn't produce an answer from the "
+          'document. Try rephrasing your question.';
+    }
+    return text;
   }
 
   Future<void> clearAllData() async {
