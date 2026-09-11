@@ -35,6 +35,7 @@ class InitState {
   final bool onboardingComplete;
   final double modelProgress;
   final double embedderProgress;
+  final String downloadPhase;
 
   const InitState({
     this.status = InitStatus.waiting,
@@ -43,6 +44,7 @@ class InitState {
     this.onboardingComplete = false,
     this.modelProgress = 0,
     this.embedderProgress = 0,
+    this.downloadPhase = '',
   });
 
   InitState copyWith({
@@ -52,6 +54,7 @@ class InitState {
     bool? onboardingComplete,
     double? modelProgress,
     double? embedderProgress,
+    String? downloadPhase,
   }) {
     return InitState(
       status: status ?? this.status,
@@ -60,6 +63,7 @@ class InitState {
       onboardingComplete: onboardingComplete ?? this.onboardingComplete,
       modelProgress: modelProgress ?? this.modelProgress,
       embedderProgress: embedderProgress ?? this.embedderProgress,
+      downloadPhase: downloadPhase ?? this.downloadPhase,
     );
   }
 }
@@ -101,16 +105,23 @@ class InitNotifier extends StateNotifier<InitState> {
   }
 
   Future<void> downloadModels() async {
-    state = state.copyWith(status: InitStatus.loading);
+    state = state.copyWith(status: InitStatus.loading, downloadPhase: 'generation');
 
     try {
       await _gemma.downloadModel(onProgress: (p) {
         state = state.copyWith(modelProgress: p);
       });
 
-      await _gemma.downloadEmbedder(onProgress: (p) {
-        state = state.copyWith(embedderProgress: p);
-      });
+      state = state.copyWith(downloadPhase: 'embedder');
+
+      await _gemma.downloadEmbedder(
+        onModelProgress: (p) {
+          state = state.copyWith(embedderProgress: p * 0.8);
+        },
+        onTokenizerProgress: (p) {
+          state = state.copyWith(embedderProgress: 0.8 + p * 0.2);
+        },
+      );
 
       await _gemma.checkModelStatus();
       await _storage.setOnboardingComplete();
@@ -227,6 +238,13 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
     _isProcessing = true;
 
     addUserMessage(question);
+
+    // Show retrieval trace animation
+    addRetrievalMessage([
+      'Searching your notes...',
+      'Finding relevant passages...',
+      'Preparing answer...',
+    ]);
 
     try {
       final result = await _rag.query(question);

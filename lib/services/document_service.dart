@@ -51,27 +51,32 @@ class DocumentService {
         return;
       }
 
-      final text = await _extractText(file);
-      if (text.isEmpty) {
+      final pages = await _extractTextByPage(file);
+      if (pages.isEmpty) {
         await _storage.saveDocument(doc.copyWith(status: DocumentStatus.failed));
         return;
       }
 
-      final chunks = _chunkText(text);
       int indexedCount = 0;
 
-      for (final chunk in chunks) {
-        final chunkId = '${docId}_chunk_$indexedCount';
-        final embedding = await _gemma.embedText(chunk);
+      for (int pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+        final pageText = pages[pageIndex];
+        if (pageText.isEmpty) continue;
 
-        if (embedding.isNotEmpty) {
-          await _gemma.addDocumentToVectorStore(
-            id: chunkId,
-            content: chunk,
-            embedding: embedding,
-            metadata: '{"documentId":"$docId","chunkIndex":$indexedCount}',
-          );
-          indexedCount++;
+        final chunks = _chunkText(pageText);
+        for (int chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+          final chunkId = '${docId}_chunk_$indexedCount';
+          final embedding = await _gemma.embedText(chunks[chunkIdx]);
+
+          if (embedding.isNotEmpty) {
+            await _gemma.addDocumentToVectorStore(
+              id: chunkId,
+              content: chunks[chunkIdx],
+              embedding: embedding,
+              metadata: '{"documentId":"$docId","page":$pageIndex}',
+            );
+            indexedCount++;
+          }
         }
       }
 
@@ -86,20 +91,20 @@ class DocumentService {
     }
   }
 
-  Future<String> _extractText(File file) async {
+  Future<List<String>> _extractTextByPage(File file) async {
     final bytes = await file.readAsBytes();
     final document = PdfDocument(inputBytes: bytes);
 
-    final buffer = StringBuffer();
+    final pages = <String>[];
     final extractor = PdfTextExtractor(document);
 
     for (int i = 0; i < document.pages.count; i++) {
       final text = extractor.extractText(startPageIndex: i, endPageIndex: i);
-      buffer.writeln(text);
+      pages.add(text);
     }
 
     document.dispose();
-    return buffer.toString();
+    return pages;
   }
 
   int _getPageCount(String filePath) {
@@ -140,7 +145,7 @@ class DocumentService {
       }
     }
 
-    await _gemma.deleteDocumentChunks(docId);
+    await _gemma.deleteDocumentChunks(docId, chunkCount: doc.chunkCount);
     await _storage.deleteDocument(docId);
   }
 

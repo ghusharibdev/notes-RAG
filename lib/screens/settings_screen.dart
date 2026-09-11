@@ -29,7 +29,7 @@ class SettingsScreen extends ConsumerWidget {
             icon: Icons.memory_rounded,
             title: 'Generation model',
             subtitle: gemma.isModelInstalled
-                ? 'Gemma 3 270M (bundled)'
+                ? 'Gemma 3 270M (installed)'
                 : 'Not installed',
             onTap: gemma.isModelInstalled
                 ? null
@@ -40,7 +40,7 @@ class SettingsScreen extends ConsumerWidget {
             icon: Icons.compare_arrows_rounded,
             title: 'Embedding model',
             subtitle: gemma.isEmbedderInstalled
-                ? 'EmbeddingGemma (bundled)'
+                ? 'EmbeddingGemma (installed)'
                 : 'Not installed',
             onTap: null,
           ),
@@ -74,13 +74,13 @@ class SettingsScreen extends ConsumerWidget {
             context,
             icon: Icons.info_outline_rounded,
             title: 'About Marginal',
-            subtitle: 'Version 0.1.0 — On-device RAG',
+            subtitle: 'Version 0.1.0 -- On-device RAG',
             onTap: null,
           ),
           const SizedBox(height: 40),
           Center(
             child: Text(
-              'Marginal — On-device RAG',
+              'Marginal -- On-device RAG',
               style: AppTextStyles.caption(context),
             ),
           ),
@@ -124,7 +124,7 @@ class SettingsScreen extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 0),
+        contentPadding: EdgeInsets.zero,
         leading: Container(
           width: 40,
           height: 40,
@@ -174,10 +174,8 @@ class SettingsScreen extends ConsumerWidget {
               Navigator.pop(ctx);
               final gemma = ref.read(gemmaServiceProvider);
               await gemma.clearAllData();
-
               final storage = ref.read(storageServiceProvider);
               await storage.clearAll();
-
               ref.read(documentListProvider.notifier).refresh();
             },
             child: Text(

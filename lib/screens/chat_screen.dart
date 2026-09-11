@@ -54,15 +54,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     setState(() => _isRetrieving = true);
 
-    // Show retrieval trace
-    notifier.addUserMessage(text);
-
-    // Simulate retrieval delay for UX
-    await Future.delayed(const Duration(milliseconds: 500));
-
     _scrollToBottom();
 
-    // Actually query the RAG pipeline
     await notifier.sendQuestion(text);
 
     setState(() => _isRetrieving = false);
@@ -74,6 +67,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final messages = ref.watch(chatMessagesProvider(widget.documentId));
 
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         leading: IconButton(
           onPressed: () => context.pop(),
@@ -113,7 +107,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           MessageBubble(
                             message: message,
                             onCitationTap: (citation) {
-                              context.push('/source/${widget.documentId}');
+                              context.push('/source/${widget.documentId}/${citation.page}');
                             },
                           ),
                       ],
@@ -165,12 +159,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final isProcessing = messages.isNotEmpty && messages.last.isStreaming;
 
     return Container(
-      padding: EdgeInsets.fromLTRB(
-        28,
-        12,
-        28,
-        12 + MediaQuery.of(context).viewInsets.bottom,
-      ),
+      padding: const EdgeInsets.fromLTRB(28, 12, 28, 12),
       decoration: BoxDecoration(
         color: AppColors.stone,
         border: Border(top: BorderSide(color: AppColors.border)),

@@ -8,16 +8,13 @@ import 'services/document_service.dart';
 import 'services/rag_service.dart';
 import 'providers/app_providers.dart';
 
-const String hfToken = 'REDACTED_HF_TOKEN';
-
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final storageService = StorageService();
-  storageService.init();
+  await storageService.init();
 
-  final gemmaService = GemmaService()..hfToken = hfToken;
-
+  final gemmaService = GemmaService();
   final documentService = DocumentService(storageService, gemmaService);
   final ragService = RagService(gemmaService);
 

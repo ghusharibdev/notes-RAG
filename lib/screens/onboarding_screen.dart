@@ -21,7 +21,6 @@ class OnboardingScreen extends ConsumerWidget {
       }
     });
 
-    // If models are already ready, skip straight to library
     if (init.status == InitStatus.ready && init.modelsReady && !init.onboardingComplete) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         context.go('/');
@@ -107,6 +106,19 @@ class OnboardingScreen extends ConsumerWidget {
   Widget _buildDownloadProgress(BuildContext context, InitState init) {
     final totalProgress = (init.modelProgress + init.embedderProgress) / 2;
 
+    String phaseLabel;
+    double phaseProgress;
+    if (init.downloadPhase == 'generation') {
+      phaseLabel = 'Downloading generation model';
+      phaseProgress = init.modelProgress;
+    } else if (init.downloadPhase == 'embedder') {
+      phaseLabel = 'Downloading embedding model';
+      phaseProgress = init.embedderProgress;
+    } else {
+      phaseLabel = 'Preparing...';
+      phaseProgress = 0;
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -124,16 +136,8 @@ class OnboardingScreen extends ConsumerWidget {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                init.modelProgress < 1.0
-                    ? 'Downloading generation model...'
-                    : 'Downloading embedding model...',
+                '$phaseLabel — ${(phaseProgress * 100).toInt()}%',
                 style: AppTextStyles.bodyMedium(context),
-              ),
-            ),
-            Text(
-              '${(totalProgress * 100).toInt()}%',
-              style: AppTextStyles.caption(context).copyWith(
-                fontWeight: FontWeight.w700,
               ),
             ),
           ],

@@ -9,8 +9,13 @@ import '../theme/app_text_styles.dart';
 
 class SourceViewerScreen extends ConsumerStatefulWidget {
   final String documentId;
+  final int highlightPage;
 
-  const SourceViewerScreen({super.key, required this.documentId});
+  const SourceViewerScreen({
+    super.key,
+    required this.documentId,
+    this.highlightPage = 0,
+  });
 
   @override
   ConsumerState<SourceViewerScreen> createState() => _SourceViewerScreenState();
@@ -20,7 +25,6 @@ class _SourceViewerScreenState extends ConsumerState<SourceViewerScreen> {
   List<String> _pages = [];
   bool _isLoading = true;
   String? _error;
-  final int _highlightPage = 0;
 
   @override
   void initState() {
@@ -124,7 +128,7 @@ class _SourceViewerScreenState extends ConsumerState<SourceViewerScreen> {
                   padding: const EdgeInsets.fromLTRB(28, 16, 28, 32),
                   itemCount: _pages.length,
                   itemBuilder: (context, index) {
-                    final isHighlighted = index == _highlightPage;
+                    final isHighlighted = index == widget.highlightPage;
                     final pageText = _pages[index];
 
                     return Padding(

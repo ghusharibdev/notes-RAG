@@ -2,8 +2,11 @@ import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
 import 'package:flutter_gemma_rag_sqlite/flutter_gemma_rag_sqlite.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:path_provider/path_provider.dart';
 
 class GemmaService {
+  static const String _defaultAppToken = 'REDACTED_HF_TOKEN';
+
   bool _initialized = false;
   bool get isInitialized => _initialized;
 
@@ -19,32 +22,26 @@ class GemmaService {
   String? _initError;
   String? get initError => _initError;
 
-  String? _hfToken;
+  String? _hfToken = _defaultAppToken;
   set hfToken(String? token) {
-    _hfToken = token;
+    _hfToken = (token != null && token.isNotEmpty) ? token : _defaultAppToken;
+  }
+
+  String? _ragDbPath;
+  bool _ragInitialized = false;
+
+  Future<void> _ensureRagInitialized() async {
+    if (_ragInitialized) return;
+    if (_ragDbPath == null) {
+      final dir = await getApplicationDocumentsDirectory();
+      _ragDbPath = '${dir.path}/marginal_rag.db';
+    }
+    await FlutterGemma.rag.initialize(_ragDbPath!);
+    _ragInitialized = true;
   }
 
   Future<void> initialize() async {
     if (_initialized) return;
-
-    // If no token set and models not already installed, mark as needing token
-    if (_hfToken == null || _hfToken!.isEmpty) {
-      // Check if models are already installed from previous run (no token needed if sideloaded)
-      final alreadyInstalled = FlutterGemma.hasActiveModel() && FlutterGemma.hasActiveEmbedder();
-
-      if (alreadyInstalled) {
-        await FlutterGemma.rag.initialize('marginal_rag.db');
-        _initialized = true;
-        _modelInstalled = true;
-        _embedderInstalled = true;
-        return;
-      }
-
-      // No token and no installed models
-      _initError = 'Hugging Face token required. Please enter your token in Settings.';
-      _initialized = false;
-      return; // Just return, don't rethrow
-    }
 
     try {
       await FlutterGemma.initialize(
@@ -54,41 +51,29 @@ class GemmaService {
         huggingFaceToken: _hfToken,
       );
 
-      // Check if models are now active
       final modelActive = FlutterGemma.hasActiveModel();
       final embedderActive = FlutterGemma.hasActiveEmbedder();
 
       if (modelActive && embedderActive) {
-        await FlutterGemma.rag.initialize('marginal_rag.db');
-        _initialized = true;
-        _modelInstalled = true;
-        _embedderInstalled = true;
-        _initError = null;
-        return;
+        await _ensureRagInitialized();
       }
 
-      // Models not active after initialization
-      _initialized = false;
-      _initError = 'Failed to initialize models with provided token.';
-      // Don't rethrow - just set the error and return
+      _initialized = true;
+      _modelInstalled = modelActive;
+      _embedderInstalled = embedderActive;
+      _initError = null;
     } catch (e) {
-      if (e.toString().contains('401') || e.toString().contains('Unauthorized')) {
-        _initError = 'Invalid Hugging Face token. Please check your token and try again.';
-      } else {
-        _initError = e.toString();
-      }
+      _initError = e.toString();
       _initialized = false;
-      // Don't rethrow - just set the error and return
     }
   }
 
   Future<void> checkModelStatus() async {
     if (!_initialized) return;
-
     try {
       _modelInstalled = FlutterGemma.hasActiveModel();
       _embedderInstalled = FlutterGemma.hasActiveEmbedder();
-    } catch (e) {
+    } catch (_) {
       _modelInstalled = false;
       _embedderInstalled = false;
     }
@@ -97,97 +82,75 @@ class GemmaService {
   Future<void> downloadModel({
     void Function(double progress)? onProgress,
   }) async {
-    if (_initialized && _modelInstalled) return; // Already installed
-
-    if (!_initialized) {
-      try {
-        await initialize();
-      } catch (e) {
-        rethrow;
-      }
-    }
-
-    // Check if we have a token
-    if (_hfToken == null || _hfToken!.isEmpty) {
-      _initError = 'Hugging Face token required. Please enter your token in Settings first.';
-      return; // Just return instead of rethrow
-    }
+    if (_initialized && _modelInstalled) return;
+    if (!_initialized) await initialize();
 
     onProgress?.call(0);
     _downloadProgress = 0;
 
     try {
       await FlutterGemma.installModel(
-        modelType: ModelType.gemmaIt,
+        modelType: ModelType.qwen3,
+        fileType: ModelFileType.litertlm,
       ).fromNetwork(
-        'https://huggingface.co/google/gemma-3-270m-it-litertlm/resolve/main/gemma-3-270m-it-qat.litertlm',
-      ).install();
-
-      await FlutterGemma.rag.initialize('marginal_rag.db');
+        'https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm',
+        token: _hfToken,
+      ).withProgress((p) {
+        _downloadProgress = p / 100.0;
+        onProgress?.call(_downloadProgress);
+      }).install();
 
       _modelInstalled = true;
       _downloadProgress = 1.0;
       onProgress?.call(1.0);
     } catch (e) {
-      if (e.toString().contains('401') || e.toString().contains('Unauthorized')) {
-        _initError = 'Invalid Hugging Face token. Please check your token and try again.';
-      } else {
-        _initError = 'Failed to download generation model: $e';
-      }
-      return; // Just return instead of rethrow
+      _initError = 'Failed to download generation model: $e';
+      throw Exception(_initError);
     }
   }
 
   Future<void> downloadEmbedder({
-    void Function(double progress)? onProgress,
+    void Function(double progress)? onModelProgress,
+    void Function(double progress)? onTokenizerProgress,
   }) async {
-    if (_initialized && _embedderInstalled) return; // Already installed
-
-    if (!_initialized) {
-      try {
-        await initialize();
-      } catch (e) {
-        rethrow;
-      }
-    }
-
-    // Check if we have a token
-    if (_hfToken == null || _hfToken!.isEmpty) {
-      _initError = 'Hugging Face token required. Please enter your token in Settings first.';
-      return; // Just return instead of rethrow
-    }
+    if (_initialized && _embedderInstalled) return;
+    if (!_initialized) await initialize();
 
     try {
       await FlutterGemma.installEmbedder()
           .modelFromNetwork(
-            'https://huggingface.co/google/embeddinggemma-300m-tflite/resolve/main/embeddinggemma-300m.tflite',
+            'https://huggingface.co/Bombek1/all-MiniLM-L12-v2-litert/resolve/main/sentence-transformers_all-MiniLM-L12-v2.tflite',
           )
+          .withModelProgress((p) {
+            onModelProgress?.call(p / 100.0);
+          })
           .tokenizerFromNetwork(
-            'https://huggingface.co/google/embeddinggemma-300m-tflite/resolve/main/sentencepiece.model',
+            'https://huggingface.co/XLabs-AI/xflux_text_encoders/resolve/main/spiece.model',
           )
+          .withTokenizerProgress((p) {
+            onTokenizerProgress?.call(p / 100.0);
+          })
           .install();
 
       _embedderInstalled = true;
-      _downloadProgress = 1.0;
-      onProgress?.call(1.0);
-    } catch (e) {
-      if (e.toString().contains('401') || e.toString().contains('Unauthorized')) {
-        _initError = 'Invalid Hugging Face token.';
-      } else {
-        _initError = 'Failed to download embedding model: $e';
+      onModelProgress?.call(1.0);
+      onTokenizerProgress?.call(1.0);
+
+      if (_modelInstalled) {
+        await _ensureRagInitialized();
       }
-      return; // Just return instead of rethrow
+    } catch (e) {
+      _initError = 'Failed to download embedding model: $e';
+      throw Exception(_initError);
     }
   }
 
   Future<List<double>> embedText(String text) async {
     if (!_initialized || !_embedderInstalled) return [];
-
     try {
       final embedder = await FlutterGemma.getActiveEmbedder();
-      final vector = await embedder.generateEmbedding(text);
-      return vector;
-    } catch (e) {
+      return await embedder.generateEmbedding(text);
+    } catch (_) {
       return [];
     }
   }
@@ -198,16 +161,12 @@ class GemmaService {
     required List<double> embedding,
     String? metadata,
   }) async {
-    try {
-      await FlutterGemma.rag.addDocumentWithEmbedding(
-        id: id,
-        content: content,
-        embedding: embedding,
-        metadata: metadata,
-      );
-    } catch (e) {
-      rethrow;
-    }
+    await FlutterGemma.rag.addDocumentWithEmbedding(
+      id: id,
+      content: content,
+      embedding: embedding,
+      metadata: metadata,
+    );
   }
 
   Future<List<RetrievalResult>> searchSimilar({
@@ -215,25 +174,17 @@ class GemmaService {
     int topK = 5,
   }) async {
     try {
-      return await FlutterGemma.rag.searchSimilar(
-        query: query,
-        topK: topK,
-      );
-    } catch (e) {
-      return []; // Return empty on error, don't crash
+      return await FlutterGemma.rag.searchSimilar(query: query, topK: topK);
+    } catch (_) {
+      return [];
     }
   }
 
-  Future<void> deleteDocumentChunks(String documentId) async {
-    try {
-      final allHits = await searchSimilar(query: documentId, topK: 1000);
-      for (final hit in allHits) {
-        if (hit.id.startsWith('${documentId}_chunk_')) {
-          await FlutterGemma.rag.removeDocument(id: hit.id);
-        }
-      }
-    } catch (e) {
-      // Ignore errors during cleanup
+  Future<void> deleteDocumentChunks(String documentId, {int chunkCount = 0}) async {
+    for (int i = 0; i < chunkCount; i++) {
+      try {
+        await FlutterGemma.rag.removeDocument(id: '${documentId}_chunk_$i');
+      } catch (_) {}
     }
   }
 
@@ -242,37 +193,28 @@ class GemmaService {
     required List<String> contextChunks,
   }) async {
     if (!_initialized || !_modelInstalled) {
-      if (_initError != null) {
-        return 'Initialization error: $_initError\nPlease enter your Hugging Face token in Settings.';
-      }
-      return 'Model not initialized. Please download models first.';
+      return 'Model not ready. Please complete model download on startup.';
     }
 
     try {
-      final model = await FlutterGemma.getActiveModel(maxTokens: 2048);
+      final model = await FlutterGemma.getActiveModel(maxTokens: 512);
       final session = await model.createSession();
-
       final contextBlock = contextChunks.asMap().entries.map((e) {
         return '[Source ${e.key + 1}]: ${e.value}';
       }).join('\n\n');
 
-      final prompt = '''You are Marginal, an on-device research assistant. 
-Answer the question based ONLY on the provided context from the user's notes.
-Always cite your sources by referencing [Source N].
-If the context doesn't contain enough information, say so honestly.
-Never claim to "understand" — frame answers as generated from retrieved passages.
+      final prompt = '''Answer based on the context. Cite with [Source N].
 
-Context from user's notes:
+Context:
 $contextBlock
 
 Question: $question
 
-Answer (cite sources):''';
+Answer:''';
 
       await session.addQueryChunk(Message.text(text: prompt, isUser: true));
       final response = await session.getResponse();
       await session.close();
-
       return response;
     } catch (e) {
       return 'Error generating response: $e';
@@ -281,9 +223,8 @@ Answer (cite sources):''';
 
   Future<void> clearAllData() async {
     try {
+      await _ensureRagInitialized();
       await FlutterGemma.rag.clear();
-    } catch (e) {
-      // Ignore errors during cleanup
-    }
+    } catch (_) {}
   }
 }

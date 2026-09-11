@@ -24,10 +24,11 @@ final router = GoRouter(
       },
     ),
     GoRoute(
-      path: '/source/:documentId',
+      path: '/source/:documentId/:page',
       builder: (context, state) {
         final docId = state.pathParameters['documentId']!;
-        return SourceViewerScreen(documentId: docId);
+        final page = int.tryParse(state.pathParameters['page'] ?? '0') ?? 0;
+        return SourceViewerScreen(documentId: docId, highlightPage: page);
       },
     ),
     GoRoute(

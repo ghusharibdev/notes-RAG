@@ -24,9 +24,9 @@ class RagService {
         if (docIdMatch != null) {
           docName = docIdMatch.group(1) ?? docName;
         }
-        final chunkMatch = RegExp(r'"chunkIndex"\s*:\s*(\d+)').firstMatch(meta);
-        if (chunkMatch != null) {
-          page = (int.tryParse(chunkMatch.group(1) ?? '0') ?? 0) ~/ 10 + 1;
+        final pageMatch = RegExp(r'"page"\s*:\s*(\d+)').firstMatch(meta);
+        if (pageMatch != null) {
+          page = int.tryParse(pageMatch.group(1) ?? '0') ?? 0;
         }
       }
 
